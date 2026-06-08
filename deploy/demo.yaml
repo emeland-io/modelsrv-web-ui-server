@@ -1,0 +1,62 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dex-config
+  namespace: emeland-demo
+data:
+  config.yaml: |
+    issuer: http://localhost:5556/dex
+    storage:
+      type: memory
+    web:
+      http: 0.0.0.0:5556
+    oauth2:
+      skipApprovalScreen: true
+    staticClients:
+      - id: emeland-ui
+        name: EmELand UI
+        redirectURIs:
+          - http://localhost:8080/callback
+        public: true
+    enablePasswordDB: true
+    staticPasswords:
+      - email: admin@emeland.io
+        # password: "password"
+        hash: "$2a$10$2b2cU8CPhOTaGrs1HRQuAueS7JTT5ZHsHSzYiFPm1leZck7Mc8T4W"
+        username: admin
+        userID: "00000000-0000-0000-0000-000000000001"
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: web-ui-server
+  namespace: emeland-demo
+  labels:
+    app: web-ui-server
+spec:
+  containers:
+    - name: web-ui-server
+      image: emeland-web-ui-server:local
+      imagePullPolicy: Never
+      args:
+        - --backend
+        - http://emeland-demo-server:80
+        - --issuer-url
+        - http://localhost:5556/dex
+        - --client-id
+        - emeland-ui
+      ports:
+        - containerPort: 8080
+    - name: dex
+      image: ghcr.io/dexidp/dex:v2.41.1
+      args: ["dex", "serve", "/etc/dex/config.yaml"]
+      ports:
+        - containerPort: 5556
+      volumeMounts:
+        - name: dex-config
+          mountPath: /etc/dex
+          readOnly: true
+  volumes:
+    - name: dex-config
+      configMap:
+        name: dex-config

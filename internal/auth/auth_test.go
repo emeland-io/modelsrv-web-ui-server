@@ -6,8 +6,8 @@ import (
 	"testing"
 )
 
-func TestMiddleware_NoToken(t *testing.T) {
-	handler := Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+func TestStubMiddleware_NoToken(t *testing.T) {
+	handler := StubMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Fatal("handler should not be called")
 	}))
 
@@ -20,9 +20,9 @@ func TestMiddleware_NoToken(t *testing.T) {
 	}
 }
 
-func TestMiddleware_ValidToken(t *testing.T) {
+func TestStubMiddleware_ValidToken(t *testing.T) {
 	var got *Claims
-	handler := Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := StubMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		got = FromContext(r.Context())
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -44,5 +44,33 @@ func TestMiddleware_ValidToken(t *testing.T) {
 	}
 	if len(got.Groups) != 2 || got.Groups[0] != "auditors" || got.Groups[1] != "owners" {
 		t.Errorf("groups = %v, want [auditors owners]", got.Groups)
+	}
+}
+
+func TestStubMiddleware_RejectsMalformed(t *testing.T) {
+	handler := StubMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("handler should not be called")
+	}))
+
+	tests := []struct {
+		name   string
+		header string
+	}{
+		{"basic auth", "Basic dXNlcjpwYXNz"},
+		{"empty bearer", "Bearer "},
+		{"no scheme", "just-a-token"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest("GET", "/", nil)
+			req.Header.Set("Authorization", tt.header)
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusUnauthorized {
+				t.Errorf("got %d, want 401", rec.Code)
+			}
+		})
 	}
 }

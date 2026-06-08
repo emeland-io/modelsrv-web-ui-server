@@ -24,7 +24,7 @@ func authedRequest(subject string, groups []string) *http.Request {
 
 	// Run through auth middleware to set context
 	var result *http.Request
-	auth.Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	auth.StubMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		result = r
 	})).ServeHTTP(httptest.NewRecorder(), req)
 	return result

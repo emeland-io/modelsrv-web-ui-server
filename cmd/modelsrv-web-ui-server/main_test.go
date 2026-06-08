@@ -9,6 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"go.emeland.io/modelsrv-web-ui-server/internal/auth"
 )
 
 func testLogger() *slog.Logger {
@@ -55,7 +57,7 @@ func TestSPAHandler_ServesIndexFallback(t *testing.T) {
 
 func TestHealthEndpoint(t *testing.T) {
 	backend, _ := url.Parse("http://localhost:9999")
-	handler := newMux(backend, "", "", testLogger())
+	handler := newMux(backend, "", "", false, auth.Config{}, nil, testLogger())
 
 	for _, path := range []string{"/", "/healthz"} {
 		t.Run(path, func(t *testing.T) {
@@ -79,7 +81,7 @@ func TestProxy_ForwardsToBackend(t *testing.T) {
 	defer backend.Close()
 
 	backendURL, _ := url.Parse(backend.URL)
-	handler := newMux(backendURL, "auditors", "", testLogger())
+	handler := newMux(backendURL, "auditors", "", false, auth.Config{}, nil, testLogger())
 
 	req := httptest.NewRequest("GET", "/api/systems", nil)
 	req.Header.Set("Authorization", "Bearer user1")
@@ -98,7 +100,7 @@ func TestProxy_ForwardsToBackend(t *testing.T) {
 func TestProxy_ReturnsBADGatewayOnBackendDown(t *testing.T) {
 	// Point to a backend that doesn't exist
 	backendURL, _ := url.Parse("http://127.0.0.1:1") // nothing listens here
-	handler := newMux(backendURL, "auditors", "", testLogger())
+	handler := newMux(backendURL, "auditors", "", false, auth.Config{}, nil, testLogger())
 
 	req := httptest.NewRequest("GET", "/api/systems", nil)
 	req.Header.Set("Authorization", "Bearer user1")
@@ -113,7 +115,7 @@ func TestProxy_ReturnsBADGatewayOnBackendDown(t *testing.T) {
 
 func TestAPI_RejectsUnauthenticated(t *testing.T) {
 	backendURL, _ := url.Parse("http://localhost:9999")
-	handler := newMux(backendURL, "auditors", "", testLogger())
+	handler := newMux(backendURL, "auditors", "", false, auth.Config{}, nil, testLogger())
 
 	req := httptest.NewRequest("GET", "/api/systems", nil)
 	rec := httptest.NewRecorder()
@@ -126,7 +128,7 @@ func TestAPI_RejectsUnauthenticated(t *testing.T) {
 
 func TestAPI_RejectsMalformedAuth(t *testing.T) {
 	backendURL, _ := url.Parse("http://localhost:9999")
-	handler := newMux(backendURL, "auditors", "", testLogger())
+	handler := newMux(backendURL, "auditors", "", false, auth.Config{}, nil, testLogger())
 
 	tests := []struct {
 		name   string
@@ -158,7 +160,7 @@ func TestAPI_AuditorGetsAccess(t *testing.T) {
 	defer backend.Close()
 
 	backendURL, _ := url.Parse(backend.URL)
-	handler := newMux(backendURL, "audit-group-uuid", "", testLogger())
+	handler := newMux(backendURL, "audit-group-uuid", "", false, auth.Config{}, nil, testLogger())
 
 	req := httptest.NewRequest("GET", "/api/contexts", nil)
 	req.Header.Set("Authorization", "Bearer auditor-user")
@@ -178,7 +180,7 @@ func TestAPI_OwnerGetsAccess(t *testing.T) {
 	defer backend.Close()
 
 	backendURL, _ := url.Parse(backend.URL)
-	handler := newMux(backendURL, "audit-group-uuid", "", testLogger())
+	handler := newMux(backendURL, "audit-group-uuid", "", false, auth.Config{}, nil, testLogger())
 
 	req := httptest.NewRequest("GET", "/api/systems", nil)
 	req.Header.Set("Authorization", "Bearer owner-user")
