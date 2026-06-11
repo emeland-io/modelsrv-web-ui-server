@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"go.emeland.io/modelsrv-web-ui-server/internal/auth"
+	"go.emeland.io/modelsrv-web-ui-server/internal/proxy"
 )
 
 func testLogger() *slog.Logger {
@@ -69,6 +70,46 @@ func TestHealthEndpoint(t *testing.T) {
 				t.Errorf("got %d, want 200", rec.Code)
 			}
 		})
+	}
+}
+
+func TestProxy_InjectsIdentityHeaders(t *testing.T) {
+	const auditorGroup = "audit-group-uuid"
+
+	var gotSubject, gotGroups, gotAuditor string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotSubject = r.Header.Get(proxy.HeaderAuthSubject)
+		gotGroups = r.Header.Get(proxy.HeaderAuthGroups)
+		gotAuditor = r.Header.Get(proxy.HeaderAuthAuditor)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	backendURL, _ := url.Parse(backend.URL)
+	handler := newMux(backendURL, auditorGroup, "", false, auth.Config{}, nil, testLogger())
+
+	req := httptest.NewRequest("GET", "/api/systems", nil)
+	req.Header.Set("Authorization", "Bearer user-1")
+	req.Header.Set("X-Groups", "team-a,"+auditorGroup)
+	req.Header.Set(proxy.HeaderAuthSubject, "spoofed-subject")
+	req.Header.Set(proxy.HeaderAuthAuditor, "true")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200", rec.Code)
+	}
+	if gotSubject != "user-1" {
+		t.Errorf("X-Auth-Subject = %q, want %q", gotSubject, "user-1")
+	}
+	if gotGroups != "team-a,"+auditorGroup {
+		t.Errorf("X-Auth-Groups = %q, want %q", gotGroups, "team-a,"+auditorGroup)
+	}
+	if gotAuditor != "true" {
+		t.Errorf("X-Auth-Auditor = %q, want %q", gotAuditor, "true")
+	}
+	if gotSubject == "spoofed-subject" {
+		t.Error("spoofed X-Auth-Subject reached backend")
 	}
 }
 

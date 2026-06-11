@@ -7,7 +7,6 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"net/http/httputil"
 	"net/url"
 	"os"
 	"os/signal"
@@ -19,6 +18,7 @@ import (
 
 	"go.emeland.io/modelsrv-web-ui-server/internal/auth"
 	"go.emeland.io/modelsrv-web-ui-server/internal/authz"
+	"go.emeland.io/modelsrv-web-ui-server/internal/proxy"
 )
 
 func main() {
@@ -85,26 +85,25 @@ func main() {
 func newMux(backend *url.URL, auditorGroupID, staticDir string, noAuth bool, authCfg auth.Config, jwks keyfunc.Keyfunc, logger *slog.Logger) http.Handler {
 	mux := http.NewServeMux()
 
-	proxy := httputil.NewSingleHostReverseProxy(backend)
-	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
+	rp := proxy.NewSingleHostReverseProxy(backend, auditorGroupID)
+	rp.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
 		logger.Error("proxy error", "error", err, "path", r.URL.Path)
 		http.Error(w, "bad gateway", http.StatusBadGateway)
 	}
 
-	var apiHandler http.Handler = proxy
+	var apiHandler http.Handler = rp
 	if !noAuth {
-		authzCfg := authz.Config{AuditorGroupID: auditorGroupID}
 		if jwks != nil {
-			apiHandler = auth.JWTMiddleware(authCfg, jwks, authz.Middleware(authzCfg, proxy))
+			apiHandler = auth.JWTMiddleware(authCfg, jwks, authz.Middleware(rp))
 		} else {
-			apiHandler = auth.StubMiddleware(authz.Middleware(authzCfg, proxy))
+			apiHandler = auth.StubMiddleware(authz.Middleware(rp))
 		}
 	} else {
 		logger.Warn("authentication disabled")
 	}
 	mux.Handle("/api/", apiHandler)
-	mux.Handle("/swagger/", proxy)
-	mux.Handle("/metrics", proxy)
+	mux.Handle("/swagger/", rp)
+	mux.Handle("/metrics", rp)
 
 	// Serve OIDC config for the frontend
 	mux.HandleFunc("/auth/config.json", func(w http.ResponseWriter, r *http.Request) {

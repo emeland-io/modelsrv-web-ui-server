@@ -31,8 +31,7 @@ func authedRequest(subject string, groups []string) *http.Request {
 }
 
 func TestMiddleware_NoClaims(t *testing.T) {
-	cfg := Config{AuditorGroupID: "audit-group-uuid"}
-	handler := Middleware(cfg, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Fatal("should not be called")
 	}))
 
@@ -45,39 +44,21 @@ func TestMiddleware_NoClaims(t *testing.T) {
 	}
 }
 
-func TestMiddleware_Auditor(t *testing.T) {
-	cfg := Config{AuditorGroupID: "audit-group-uuid"}
+func TestMiddleware_AuthenticatedUser(t *testing.T) {
 	var called bool
-	handler := Middleware(cfg, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		called = true
 		w.WriteHeader(http.StatusOK)
 	}))
 
-	req := authedRequest("auditor-user", []string{"audit-group-uuid"})
+	req := authedRequest("user-1", []string{"team-a"})
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
 	if !called {
-		t.Error("handler not called for auditor")
+		t.Error("handler not called for authenticated user")
 	}
 	if rec.Code != http.StatusOK {
 		t.Errorf("got %d, want 200", rec.Code)
-	}
-}
-
-func TestMiddleware_Owner(t *testing.T) {
-	cfg := Config{AuditorGroupID: "audit-group-uuid"}
-	var called bool
-	handler := Middleware(cfg, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		called = true
-		w.WriteHeader(http.StatusOK)
-	}))
-
-	req := authedRequest("owner-user", []string{"some-other-group"})
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
-
-	if !called {
-		t.Error("handler not called for owner")
 	}
 }
