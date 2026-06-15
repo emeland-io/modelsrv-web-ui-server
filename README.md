@@ -59,11 +59,11 @@ go run ./cmd/modelsrv-web-ui-server --static-dir ./static --no-auth
 ### Docker
 
 ```bash
-# Production image (server only, no UI bundled)
+# Build image (bundles UI release)
 docker build -t emeland-web-ui-server .
 
-# Local/demo image (bundles UI from release)
-docker build -f Dockerfile.local -t emeland-web-ui-server:local .
+# Build with specific UI version
+docker build --build-arg UI_VERSION=v0.1.0-rc1 -t emeland-web-ui-server .
 ```
 
 ## Demo Deployment (KinD)
