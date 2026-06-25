@@ -39,8 +39,6 @@ spec:
       image: emeland-web-ui-server:local
       imagePullPolicy: Never
       args:
-        - --backend
-        - http://emeland-demo-server:80
         - --issuer-url
         - http://localhost:5556/dex
         - --client-id

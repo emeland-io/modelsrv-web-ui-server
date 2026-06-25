@@ -6,39 +6,53 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/MicahParks/keyfunc/v3"
 
+	"go.emeland.io/modelsrv/pkg/authz"
+	"go.emeland.io/modelsrv/pkg/backend"
+	"go.emeland.io/modelsrv/pkg/endpoint"
+	"go.emeland.io/modelsrv/pkg/filesensor"
+
 	"go.emeland.io/modelsrv-web-ui-server/internal/auth"
-	"go.emeland.io/modelsrv-web-ui-server/internal/authz"
-	"go.emeland.io/modelsrv-web-ui-server/internal/proxy"
 )
 
 func main() {
 	listenAddr := flag.String("listen", envOrDefault("LISTEN_ADDR", ":8080"), "Address to listen on")
-	backendURL := flag.String("backend", envOrDefault("BACKEND_URL", "http://localhost:8081"), "modelsrv backend URL")
+	dataDir := flag.String("data-dir", envOrDefault("DATA_DIR", ""), "Directory to watch for YAML model definitions (disabled if empty)")
 	staticDir := flag.String("static-dir", envOrDefault("STATIC_DIR", ""), "Directory to serve static UI files from (disabled if empty)")
-	auditorGroup := flag.String("auditor-group", envOrDefault("AUDITOR_GROUP_ID", ""), "UUID of the auditor Group (full access)")
-	issuerURL := flag.String("issuer-url", envOrDefault("OIDC_ISSUER_URL", ""), "OIDC issuer URL (e.g. http://dex:5556/dex)")
+	auditorGroup := flag.String("auditor-group", envOrDefault("AUDITOR_GROUP_ID", ""), "UUID of the auditor group (full access)")
+	publicTypes := flag.String("public-resource-types", envOrDefault("PUBLIC_RESOURCE_TYPES", ""), "Comma-separated resource types always visible")
+	issuerURL := flag.String("issuer-url", envOrDefault("OIDC_ISSUER_URL", ""), "OIDC issuer URL")
 	clientID := flag.String("client-id", envOrDefault("OIDC_CLIENT_ID", "emeland-ui"), "OIDC client ID / audience")
-	noAuth := flag.Bool("no-auth", envOrDefault("NO_AUTH", "") != "", "Disable authentication (for development/demo only)")
+	noAuth := flag.Bool("no-auth", envOrDefault("NO_AUTH", "") != "", "Disable authentication (development only)")
 	flag.Parse()
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 
-	backend, err := url.Parse(*backendURL)
+	// Create in-process modelsrv backend
+	b, err := backend.New()
 	if err != nil {
-		logger.Error("invalid backend URL", "error", err)
+		logger.Error("failed to create backend", "error", err)
 		os.Exit(1)
 	}
 
+	// Optionally watch a data directory for YAML files
+	if *dataDir != "" {
+		abs, _ := filepath.Abs(*dataDir)
+		logger.Info("file sensor enabled", "dir", abs)
+		filesensor.Start(context.Background(), abs, b.GetModel(), nil)
+	}
+
+	// OIDC setup
 	var jwks keyfunc.Keyfunc
 	if !*noAuth && *issuerURL != "" {
 		jwksURL := *issuerURL + "/keys"
@@ -50,8 +64,26 @@ func main() {
 		logger.Info("OIDC enabled", "issuer", *issuerURL, "clientID", *clientID)
 	}
 
-	authCfg := auth.Config{IssuerURL: *issuerURL, ClientID: *clientID}
-	mux := newMux(backend, *auditorGroup, *staticDir, *noAuth, authCfg, jwks, logger)
+	// Build modelsrv handler
+	baseURL := resolveBaseURL(*listenAddr)
+	modelsrvHandler := endpoint.NewHandler(b.GetModel(), b.GetEventManager(), baseURL, endpoint.WebListenerOptions{
+		TrustAuthHeaders: true,
+		AuthzConfig: authz.Config{
+			AuditorGroup: *auditorGroup,
+			PublicTypes:  authz.ParsePublicResourceTypes(*publicTypes),
+		},
+	})
+
+	// Build the top-level mux
+	mux := newMux(muxConfig{
+		modelsrvHandler: modelsrvHandler,
+		staticDir:       *staticDir,
+		noAuth:          *noAuth,
+		authCfg:         auth.Config{IssuerURL: *issuerURL, ClientID: *clientID},
+		jwks:            jwks,
+		auditorGroupID:  *auditorGroup,
+		logger:          logger,
+	})
 
 	srv := &http.Server{
 		Addr:              *listenAddr,
@@ -59,7 +91,7 @@ func main() {
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
-	logger.Info("starting server", "listen", *listenAddr, "backend", backend.String())
+	logger.Info("starting server", "listen", *listenAddr)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -81,44 +113,51 @@ func main() {
 	}
 }
 
-// newMux builds the HTTP handler with proxy, auth, authz, and static file serving.
-func newMux(backend *url.URL, auditorGroupID, staticDir string, noAuth bool, authCfg auth.Config, jwks keyfunc.Keyfunc, logger *slog.Logger) http.Handler {
+type muxConfig struct {
+	modelsrvHandler http.Handler
+	staticDir       string
+	noAuth          bool
+	authCfg         auth.Config
+	jwks            keyfunc.Keyfunc
+	auditorGroupID  string
+	logger          *slog.Logger
+}
+
+// newMux builds the HTTP handler with auth, modelsrv API, and static file serving.
+func newMux(cfg muxConfig) http.Handler {
 	mux := http.NewServeMux()
 
-	rp := proxy.NewSingleHostReverseProxy(backend, auditorGroupID)
-	rp.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
-		logger.Error("proxy error", "error", err, "path", r.URL.Path)
-		http.Error(w, "bad gateway", http.StatusBadGateway)
-	}
-
-	var apiHandler http.Handler = rp
-	if !noAuth {
-		if jwks != nil {
-			apiHandler = auth.JWTMiddleware(authCfg, jwks, authz.Middleware(rp))
+	// Build the header-injecting handler once; wrap with auth as needed.
+	injected := headerInjector(cfg.modelsrvHandler, cfg.auditorGroupID)
+	var apiHandler http.Handler
+	if !cfg.noAuth {
+		if cfg.jwks != nil {
+			apiHandler = auth.JWTMiddleware(cfg.authCfg, cfg.jwks, injected)
 		} else {
-			apiHandler = auth.StubMiddleware(authz.Middleware(rp))
+			apiHandler = auth.StubMiddleware(injected)
 		}
 	} else {
-		logger.Warn("authentication disabled")
+		cfg.logger.Warn("authentication disabled")
+		apiHandler = injected
 	}
 	mux.Handle("/api/", apiHandler)
-	mux.Handle("/swagger/", rp)
-	mux.Handle("/metrics", rp)
+	mux.Handle("/swagger/", cfg.modelsrvHandler)
+	mux.Handle("/metrics", cfg.modelsrvHandler)
 
-	// Serve OIDC config for the frontend
+	// OIDC config for the frontend
 	mux.HandleFunc("/auth/config.json", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		if noAuth || authCfg.IssuerURL == "" {
+		if cfg.noAuth || cfg.authCfg.IssuerURL == "" {
 			_, _ = w.Write([]byte(`{"issuerUrl":"","clientId":"","redirectUri":""}`))
 		} else {
 			_, _ = fmt.Fprintf(w, `{"issuerUrl":%q,"clientId":%q,"redirectUri":"http://%s/callback"}`,
-				authCfg.IssuerURL, authCfg.ClientID, r.Host)
+				cfg.authCfg.IssuerURL, cfg.authCfg.ClientID, r.Host)
 		}
 	})
 
-	// Proxy token exchange to avoid CORS issues with the OIDC provider
-	if authCfg.IssuerURL != "" {
-		tokenURL := authCfg.IssuerURL + "/token"
+	// Token exchange proxy (avoids CORS with IdP)
+	if cfg.authCfg.IssuerURL != "" {
+		tokenURL := cfg.authCfg.IssuerURL + "/token"
 		mux.HandleFunc("/auth/token", func(w http.ResponseWriter, r *http.Request) {
 			if r.Method != http.MethodPost {
 				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -142,9 +181,10 @@ func newMux(backend *url.URL, auditorGroupID, staticDir string, noAuth bool, aut
 		})
 	}
 
-	if staticDir != "" {
-		abs, _ := filepath.Abs(staticDir)
-		logger.Info("serving static files", "dir", abs)
+	// SPA static files
+	if cfg.staticDir != "" {
+		abs, _ := filepath.Abs(cfg.staticDir)
+		cfg.logger.Info("serving static files", "dir", abs)
 		mux.Handle("/", spaHandler(http.Dir(abs)))
 	} else {
 		mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -158,6 +198,49 @@ func newMux(backend *url.URL, auditorGroupID, staticDir string, noAuth bool, aut
 	}
 
 	return mux
+}
+
+// headerInjector strips client-sent X-Auth-* headers and injects trusted identity
+// headers from the authenticated claims so modelsrv's authz layer can enforce
+// ownership visibility.
+func headerInjector(next http.Handler, auditorGroupID string) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Strip any client-sent X-Auth-* headers to prevent spoofing.
+		for key := range r.Header {
+			if strings.HasPrefix(strings.ToLower(key), "x-auth-") {
+				r.Header.Del(key)
+			}
+		}
+		claims := auth.FromContext(r.Context())
+		if claims != nil {
+			r.Header.Set("X-Auth-Subject", claims.Subject)
+			if len(claims.Groups) > 0 {
+				r.Header.Set("X-Auth-Groups", strings.Join(claims.Groups, ","))
+			}
+			if auditorGroupID != "" {
+				for _, g := range claims.Groups {
+					if g == auditorGroupID {
+						r.Header.Set("X-Auth-Auditor", "true")
+						break
+					}
+				}
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// resolveBaseURL produces a usable base URL for modelsrv's OpenAPI spec links.
+// When listening on all interfaces (e.g. ":8080"), it substitutes localhost.
+func resolveBaseURL(listenAddr string) string {
+	host, port, err := net.SplitHostPort(listenAddr)
+	if err != nil {
+		return fmt.Sprintf("http://%s/api", listenAddr)
+	}
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		host = "localhost"
+	}
+	return fmt.Sprintf("http://%s/api", net.JoinHostPort(host, port))
 }
 
 // spaHandler serves static files, falling back to index.html for SPA routing.

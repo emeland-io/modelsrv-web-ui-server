@@ -1,13 +1,16 @@
 # modelsrv-web-ui-server
 
-A Go HTTP server that sits between the EmELand UI and modelsrv backend, providing authentication, authorization, and static file serving.
+A modelsrv instance that additionally provides the EmELand web UI and OIDC authentication.
+
+Like all EmELand modules (git-sensor, k8s-sensor, etc.), this embeds modelsrv as a library. The distinguishing feature is the web UI and OIDC auth layer it adds on top.
 
 ## Features
 
-- Reverse proxy to modelsrv backend (`/api/`, `/swagger/`, `/metrics`)
+- Full modelsrv API (`/api/`, `/swagger/`, `/metrics`)
+- File sensor for loading YAML model definitions from disk
+- Event subscriber mechanism for receiving data from upstream sensors
+- OIDC JWT validation with ownership visibility enforcement
 - SPA static file serving with index.html fallback
-- OIDC JWT validation via JWKS
-- Authorization middleware (auditor = full access, owner = scoped by `emeland.io/owner-context`)
 - `/auth/config.json` endpoint for frontend OIDC discovery
 - `/auth/token` proxy for token exchange (avoids CORS)
 - `--no-auth` flag for development/demo without authentication
@@ -17,11 +20,12 @@ A Go HTTP server that sits between the EmELand UI and modelsrv backend, providin
 | Flag | Env | Default | Description |
 |------|-----|---------|-------------|
 | `--listen` | `LISTEN_ADDR` | `:8080` | Server listen address |
-| `--backend` | `BACKEND_URL` | `http://localhost:8081` | modelsrv backend URL |
+| `--data-dir` | `DATA_DIR` | (disabled) | Directory to watch for YAML model definitions |
 | `--static-dir` | `STATIC_DIR` | (disabled) | UI static files directory |
 | `--issuer-url` | `OIDC_ISSUER_URL` | (empty) | OIDC issuer URL |
 | `--client-id` | `OIDC_CLIENT_ID` | `emeland-ui` | OIDC client ID |
-| `--auditor-group` | `AUDITOR_GROUP_ID` | (empty) | Auditor group UUID |
+| `--auditor-group` | `AUDITOR_GROUP_ID` | (empty) | Auditor group UUID (full access) |
+| `--public-resource-types` | `PUBLIC_RESOURCE_TYPES` | (empty) | Comma-separated resource types always visible |
 | `--no-auth` | `NO_AUTH` | false | Disable authentication |
 
 ## Getting Started
@@ -29,54 +33,47 @@ A Go HTTP server that sits between the EmELand UI and modelsrv backend, providin
 ### Prerequisites
 
 - Go 1.25+
-- A running [modelsrv](https://github.com/emeland-io/modelsrv) instance as backend
 
 ### Build & Run Locally
 
 ```bash
-# Build
 make build
 
 # Run without auth (development mode)
-make run -- --no-auth --backend http://localhost:8081
+./modelsrv-web-ui-server --no-auth --data-dir ./data
 
 # Run with OIDC
-go run ./cmd/modelsrv-web-ui-server \
-  --backend http://localhost:8081 \
+./modelsrv-web-ui-server \
   --issuer-url http://localhost:5556/dex \
   --client-id emeland-ui \
-  --auditor-group <group-uuid>
+  --auditor-group <group-uuid> \
+  --data-dir ./data
 ```
 
 ### Serve Static UI
 
-To also serve the EmELand UI frontend, pass `--static-dir` pointing to a directory containing the built UI assets:
-
 ```bash
-go run ./cmd/modelsrv-web-ui-server --static-dir ./static --no-auth
+./modelsrv-web-ui-server --static-dir ./static --no-auth
 ```
 
 ### Docker
 
 ```bash
-# Build image (bundles UI release)
 docker build -t emeland-web-ui-server .
 
 # Build with specific UI version
 docker build --build-arg UI_VERSION=v0.1.0-rc1 -t emeland-web-ui-server .
 ```
 
-## Demo Deployment (KinD)
+## Architecture
 
-A demo manifest is provided in `deploy/demo.yaml` that runs the server with a Dex sidecar for local OIDC:
-
-```bash
-kubectl create namespace emeland-demo
-kubectl apply -f deploy/demo.yaml
-kubectl port-forward -n emeland-demo pod/web-ui-server 8080:8080 5556:5556
+```
+Browser -> [OIDC auth] -> [X-Auth-* header injection] -> modelsrv handler (/api/, /swagger/, /metrics)
+       \-> SPA static files (/)
+       \-> /auth/config.json, /auth/token (OIDC helpers)
 ```
 
-Then open http://localhost:8080 and log in with `admin@emeland.io` / `password`.
+Data flows in via the event subscriber mechanism from upstream sensors (git-sensor, k8s-sensor, etc.) or from YAML files watched by the built-in file sensor.
 
 ## Development
 
