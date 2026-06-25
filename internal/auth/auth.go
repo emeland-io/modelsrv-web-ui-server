@@ -18,6 +18,11 @@ type Claims struct {
 	Groups  []string
 }
 
+// NewContext returns a context with the given claims attached.
+func NewContext(ctx context.Context, c *Claims) context.Context {
+	return context.WithValue(ctx, ctxKey{}, c)
+}
+
 // FromContext retrieves the authenticated Claims from the request context.
 func FromContext(ctx context.Context) *Claims {
 	c, _ := ctx.Value(ctxKey{}).(*Claims)
@@ -55,7 +60,7 @@ func JWTMiddleware(cfg Config, jwks keyfunc.Keyfunc, next http.Handler) http.Han
 			return
 		}
 
-		ctx := context.WithValue(r.Context(), ctxKey{}, claims)
+		ctx := NewContext(r.Context(), claims)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
@@ -71,7 +76,7 @@ func StubMiddleware(next http.Handler) http.Handler {
 
 		groups := parseGroups(r.Header.Get("X-Groups"))
 		claims := &Claims{Subject: token, Groups: groups}
-		ctx := context.WithValue(r.Context(), ctxKey{}, claims)
+		ctx := NewContext(r.Context(), claims)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
