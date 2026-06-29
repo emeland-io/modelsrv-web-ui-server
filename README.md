@@ -61,9 +61,21 @@ make build
 ```bash
 docker build -t emeland-web-ui-server .
 
-# Build with specific UI version
-docker build --build-arg UI_VERSION=v0.1.0-rc1 -t emeland-web-ui-server .
+# Build with specific UI version (default is in UI_VERSION / Dockerfile)
+docker build --build-arg UI_VERSION=v0.4.0-rc1 -t emeland-web-ui-server .
 ```
+
+### Container images (GHCR)
+
+Images are published to `ghcr.io/emeland-io/modelsrv-web-ui-server`:
+
+| Trigger | Image tags |
+|---------|------------|
+| Push to `main` | `latest`, `main`, `sha-<commit>` |
+| GitHub Release published | semver tags from the release (e.g. `v0.1.0`, `0.1.0`, `0.1`, `0`); stable releases also get `latest` |
+| Manual (`workflow_dispatch`) | same as above depending on ref; optional `ui_version` input |
+
+The bundled emeland-ui version is tracked in [`UI_VERSION`](UI_VERSION). Update that file before releasing when the UI dependency changes. CI always passes it as the Docker `UI_VERSION` build arg.
 
 ## Architecture
 

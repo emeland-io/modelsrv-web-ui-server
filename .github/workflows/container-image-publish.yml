@@ -3,6 +3,13 @@ name: Publish container image
 on:
   push:
     branches: [main]
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      ui_version:
+        description: emeland-ui release to bundle (defaults to UI_VERSION file)
+        required: false
 
 env:
   REGISTRY: ghcr.io
@@ -16,6 +23,19 @@ jobs:
       packages: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'release' && github.event.release.tag_name || github.ref }}
+
+      - name: Resolve bundled UI version
+        id: ui
+        run: |
+          if [ -n "${{ inputs.ui_version }}" ]; then
+            version="${{ inputs.ui_version }}"
+          else
+            version="$(tr -d '[:space:]' < UI_VERSION)"
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "Bundling emeland-ui ${version}"
 
       - name: Log in to the Container registry
         uses: docker/login-action@v4.2.0
@@ -29,6 +49,14 @@ jobs:
         uses: docker/metadata-action@v6.1.0
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=sha,prefix=sha-
+            type=raw,value=latest,enable=${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=raw,value=latest,enable=${{ github.event_name == 'release' && !github.event.release.prerelease }}
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v7.2.0
@@ -37,3 +65,5 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            UI_VERSION=${{ steps.ui.outputs.version }}
