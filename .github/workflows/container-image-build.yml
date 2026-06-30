@@ -17,10 +17,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Resolve bundled UI version
-        id: ui
-        run: echo "version=$(tr -d '[:space:]' < UI_VERSION)" >> "$GITHUB_OUTPUT"
-
       - name: Log in to the Container registry
         uses: docker/login-action@v4.2.0
         with:
@@ -41,5 +37,3 @@ jobs:
           push: false
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          build-args: |
-            UI_VERSION=${{ steps.ui.outputs.version }}
