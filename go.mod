@@ -5,7 +5,7 @@ go 1.25.10
 require (
 	github.com/MicahParks/keyfunc/v3 v3.8.0
 	github.com/golang-jwt/jwt/v5 v5.2.2
-	go.emeland.io/modelsrv v0.9.3-rc1
+	go.emeland.io/modelsrv v0.9.3-rc3
 )
 
 require (
