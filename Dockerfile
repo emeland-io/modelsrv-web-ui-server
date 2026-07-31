@@ -9,7 +9,7 @@ COPY . .
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -o modelsrv-web-ui-server ./cmd/modelsrv-web-ui-server
 
 FROM alpine:3.22 AS ui
-ARG UI_VERSION=v0.4.4-rc
+ARG UI_VERSION=v0.4.5-rc
 RUN wget -qO- "https://github.com/emeland-io/emeland-ui/releases/download/${UI_VERSION}/emeland-ui-${UI_VERSION}.tar.gz" \
     | tar -xz -C /tmp
 
