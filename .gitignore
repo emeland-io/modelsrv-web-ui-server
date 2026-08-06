@@ -3,3 +3,4 @@ coverage.out
 coverage.html
 /modelsrv-web-ui-server
 static/
+data/
