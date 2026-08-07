@@ -31,8 +31,9 @@ func FromContext(ctx context.Context) *Claims {
 
 // Config holds OIDC validation settings.
 type Config struct {
-	IssuerURL string
-	ClientID  string
+	IssuerURL         string
+	ClientID          string
+	RedirectURIScheme string
 }
 
 // JWTMiddleware validates Bearer tokens as JWTs against the issuer's JWKS.

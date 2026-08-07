@@ -33,8 +33,15 @@ func main() {
 	publicTypes := flag.String("public-resource-types", envOrDefault("PUBLIC_RESOURCE_TYPES", ""), "Comma-separated resource types always visible")
 	issuerURL := flag.String("issuer-url", envOrDefault("OIDC_ISSUER_URL", ""), "OIDC issuer URL")
 	clientID := flag.String("client-id", envOrDefault("OIDC_CLIENT_ID", "emeland-ui"), "OIDC client ID / audience")
+	redirectURIScheme := flag.String("redirect-uri-scheme", envOrDefault("REDIRECT_URI_SCHEME", "http"), "URI scheme for redirect URI (http or https)")
 	noAuth := flag.Bool("no-auth", envOrDefault("NO_AUTH", "") != "", "Disable authentication (development only)")
 	flag.Parse()
+
+	// Validate redirectURIScheme
+	if err := validateRedirectURIScheme(*redirectURIScheme); err != nil {
+		fmt.Fprintf(os.Stderr, "invalid redirect-uri-scheme: %v\n", err)
+		os.Exit(1)
+	}
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 
@@ -76,13 +83,13 @@ func main() {
 
 	// Build the top-level mux
 	mux := newMux(muxConfig{
-		modelsrvHandler: modelsrvHandler,
-		staticDir:       *staticDir,
-		noAuth:          *noAuth,
-		authCfg:         auth.Config{IssuerURL: *issuerURL, ClientID: *clientID},
-		jwks:            jwks,
-		auditorGroupID:  *auditorGroup,
-		logger:          logger,
+		modelsrvHandler:   modelsrvHandler,
+		staticDir:         *staticDir,
+		noAuth:            *noAuth,
+		authCfg:           auth.Config{IssuerURL: *issuerURL, ClientID: *clientID, RedirectURIScheme: *redirectURIScheme},
+		jwks:              jwks,
+		auditorGroupID:    *auditorGroup,
+		logger:            logger,
 	})
 
 	srv := &http.Server{
@@ -150,8 +157,12 @@ func newMux(cfg muxConfig) http.Handler {
 		if cfg.noAuth || cfg.authCfg.IssuerURL == "" {
 			_, _ = w.Write([]byte(`{"issuerUrl":"","clientId":"","redirectUri":""}`))
 		} else {
-			_, _ = fmt.Fprintf(w, `{"issuerUrl":%q,"clientId":%q,"redirectUri":"http://%s/callback"}`,
-				cfg.authCfg.IssuerURL, cfg.authCfg.ClientID, r.Host)
+			scheme := cfg.authCfg.RedirectURIScheme
+			if scheme == "" {
+				scheme = "http"
+			}
+			_, _ = fmt.Fprintf(w, `{"issuerUrl":%q,"clientId":%q,"redirectUri":"%s://%s/callback"}`,
+				cfg.authCfg.IssuerURL, cfg.authCfg.ClientID, scheme, r.Host)
 		}
 	})
 
@@ -267,4 +278,14 @@ func envOrDefault(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// validateRedirectURIScheme checks that the scheme is one of the allowed values.
+func validateRedirectURIScheme(scheme string) error {
+	switch scheme {
+	case "http", "https":
+		return nil
+	default:
+		return fmt.Errorf("must be 'http' or 'https', got %q", scheme)
+	}
 }

@@ -277,3 +277,105 @@ func TestAuthToken_ProxiesToIdP(t *testing.T) {
 		t.Errorf("expected token response, got %q", rec.Body.String())
 	}
 }
+
+func TestAuthConfigJSON_WithHTTPSScheme(t *testing.T) {
+	handler := testMux(func(c *muxConfig) {
+		c.noAuth = false
+		c.authCfg = auth.Config{
+			IssuerURL:         "https://dex.example.com/dex",
+			ClientID:          "my-client",
+			RedirectURIScheme: "https",
+		}
+	})
+
+	req := httptest.NewRequest("GET", "/auth/config.json", nil)
+	req.Host = "api.example.com:443"
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, `"redirectUri":"https://api.example.com:443/callback"`) {
+		t.Errorf("expected https redirectUri, got %q", body)
+	}
+}
+
+func TestAuthConfigJSON_WithHTTPScheme(t *testing.T) {
+	handler := testMux(func(c *muxConfig) {
+		c.noAuth = false
+		c.authCfg = auth.Config{
+			IssuerURL:         "http://dex:5556/dex",
+			ClientID:          "my-client",
+			RedirectURIScheme: "http",
+		}
+	})
+
+	req := httptest.NewRequest("GET", "/auth/config.json", nil)
+	req.Host = "localhost:8080"
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, `"redirectUri":"http://localhost:8080/callback"`) {
+		t.Errorf("expected http redirectUri, got %q", body)
+	}
+}
+
+func TestAuthConfigJSON_DefaultSchemeIsHTTP(t *testing.T) {
+	handler := testMux(func(c *muxConfig) {
+		c.noAuth = false
+		// Explicitly use empty scheme to test default behavior
+		c.authCfg = auth.Config{
+			IssuerURL:         "http://dex:5556/dex",
+			ClientID:          "my-client",
+			RedirectURIScheme: "",
+		}
+	})
+
+	req := httptest.NewRequest("GET", "/auth/config.json", nil)
+	req.Host = "example.com:8080"
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, `"redirectUri":"http://example.com:8080/callback"`) {
+		t.Errorf("expected http redirectUri as default, got %q", body)
+	}
+}
+
+func TestValidateRedirectURIScheme(t *testing.T) {
+	tests := []struct {
+		scheme    string
+		wantValid bool
+	}{
+		{"http", true},
+		{"https", true},
+		{"HTTP", false},
+		{"HTTPS", false},
+		{"ftp", false},
+		{"", false},
+		{"ws", false},
+		{"wss", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.scheme, func(t *testing.T) {
+			err := validateRedirectURIScheme(tt.scheme)
+			if (err == nil) != tt.wantValid {
+				t.Errorf("validateRedirectURIScheme(%q) error = %v, want valid = %v", tt.scheme, err, tt.wantValid)
+			}
+			if err != nil && !strings.Contains(err.Error(), "must be 'http' or 'https'") {
+				t.Errorf("unexpected error message: %v", err)
+			}
+		})
+	}
+}
+
