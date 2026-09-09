@@ -125,8 +125,8 @@ github.com/ugorji/go/codec v1.2.11 h1:BMaWp1Bb6fHwEtbplGBGJ498wD+LKlNSl25MjdZY4d
 github.com/ugorji/go/codec v1.2.11/go.mod h1:UNopzCgEMSXjBc6AOMqYvWC1ktqTAfzJZUZgYf6w6lg=
 github.com/woodsbury/decimal128 v1.3.0 h1:8pffMNWIlC0O5vbyHWFZAt5yWvWcrHA+3ovIIjVWss0=
 github.com/woodsbury/decimal128 v1.3.0/go.mod h1:C5UTmyTjW3JftjUFzOVhC20BEQa2a4ZKOB5I6Zjb+ds=
-go.emeland.io/modelsrv v0.10.3 h1:wXUGArdpEVvacfW1RDo1zYwFzC8Mz8sVQIwv3Ea/kdU=
-go.emeland.io/modelsrv v0.10.3/go.mod h1:kTI50e+v5tKN+sf06P65sVVWCKPoE7zWVTNnx42l4jw=
+go.emeland.io/modelsrv v0.10.4 h1:agHej5QQgFvqBfPmkZkJEOSr15FF5+4Wl7t8FGA6fPs=
+go.emeland.io/modelsrv v0.10.4/go.mod h1:kTI50e+v5tKN+sf06P65sVVWCKPoE7zWVTNnx42l4jw=
 go.uber.org/goleak v1.3.0 h1:2K3zAYmnTNqV73imy9J1T3WC+gmCePx2hEGkimedGto=
 go.uber.org/goleak v1.3.0/go.mod h1:CoHD4mav9JJNrW/WLlf7HGZPjdw8EucARQHekz1X6bE=
 go.uber.org/mock v0.6.0 h1:hyF9dfmbgIX5EfOdasqLsWD6xqpNZlXblLB/Dbnwv3Y=

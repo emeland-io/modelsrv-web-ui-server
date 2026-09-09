@@ -1,8 +1,6 @@
 package main
 
 import (
-	"io"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -10,11 +8,13 @@ import (
 	"strings"
 	"testing"
 
+	"go.uber.org/zap"
+
 	"go.emeland.io/modelsrv-web-ui-server/internal/auth"
 )
 
-func testLogger() *slog.Logger {
-	return slog.New(slog.NewJSONHandler(io.Discard, nil))
+func testLogger() *zap.SugaredLogger {
+	return zap.NewNop().Sugar()
 }
 
 // fakeModelsrvHandler captures the headers it receives.
@@ -374,6 +374,35 @@ func TestValidateRedirectURIScheme(t *testing.T) {
 			}
 			if err != nil && !strings.Contains(err.Error(), "must be 'http' or 'https'") {
 				t.Errorf("unexpected error message: %v", err)
+			}
+		})
+	}
+}
+
+func TestNewLogger(t *testing.T) {
+	tests := []struct {
+		name      string
+		level     string
+		encoding  string
+		wantValid bool
+	}{
+		{"defaults", "", "", true},
+		{"json info", "info", "json", true},
+		{"console debug", "debug", "console", true},
+		{"warn", "warn", "json", true},
+		{"error", "error", "json", true},
+		{"bad level", "verbose", "json", false},
+		{"bad encoding", "info", "xml", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			log, err := newLogger(tt.level, tt.encoding)
+			if (err == nil) != tt.wantValid {
+				t.Fatalf("newLogger(%q, %q) error = %v, want valid = %v", tt.level, tt.encoding, err, tt.wantValid)
+			}
+			if tt.wantValid && log == nil {
+				t.Error("expected a logger, got nil")
 			}
 		})
 	}

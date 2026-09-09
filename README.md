@@ -27,6 +27,21 @@ Like all EmELand modules (git-sensor, k8s-sensor, etc.), this embeds modelsrv as
 | `--auditor-group` | `AUDITOR_GROUP_ID` | (empty) | Auditor group UUID (full access) |
 | `--public-resource-types` | `PUBLIC_RESOURCE_TYPES` | (empty) | Comma-separated resource types always visible |
 | `--no-auth` | `NO_AUTH` | false | Disable authentication |
+| `--log-level` | `LOG_LEVEL` | `info` | Log level (`debug`, `info`, `warn`, `error`) |
+| `--log-encoding` | `LOG_ENCODING` | `json` | Log encoding (`json` or `console`) |
+
+### Logging
+
+A single zap logger is shared with the embedded modelsrv library, so one stream carries:
+
+- Application lifecycle (startup, shutdown, OIDC and file sensor setup)
+- HTTP requests handled by the modelsrv API (`/api/`); `/swagger/` and `/metrics` log at `debug`
+- File sensor activity, including documents skipped because of validation errors
+- Event manager subscriber notification failures
+- modelsrv internals that write via the std `log` package (redirected into zap)
+
+Use `--log-encoding console` for readable local development output, and `--log-level debug`
+to include static asset and infrastructure requests.
 
 ## Getting Started
 
