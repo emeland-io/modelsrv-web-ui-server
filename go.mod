@@ -5,7 +5,8 @@ go 1.25.10
 require (
 	github.com/MicahParks/keyfunc/v3 v3.8.0
 	github.com/golang-jwt/jwt/v5 v5.2.2
-	go.emeland.io/modelsrv v0.10.3
+	go.emeland.io/modelsrv v0.10.4
+	go.uber.org/zap v1.27.0
 )
 
 require (
@@ -53,7 +54,6 @@ require (
 	github.com/prometheus/procfs v0.16.1 // indirect
 	github.com/woodsbury/decimal128 v1.3.0 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
-	go.uber.org/zap v1.27.0 // indirect
 	go.yaml.in/yaml/v2 v2.4.2 // indirect
 	golang.org/x/sys v0.43.0 // indirect
 	golang.org/x/time v0.9.0 // indirect

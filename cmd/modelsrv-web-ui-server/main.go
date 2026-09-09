@@ -5,7 +5,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -16,6 +15,8 @@ import (
 	"time"
 
 	"github.com/MicahParks/keyfunc/v3"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 
 	"go.emeland.io/modelsrv/pkg/authz"
 	"go.emeland.io/modelsrv/pkg/backend"
@@ -35,28 +36,41 @@ func main() {
 	clientID := flag.String("client-id", envOrDefault("OIDC_CLIENT_ID", "emeland-ui"), "OIDC client ID / audience")
 	redirectURIScheme := flag.String("redirect-uri-scheme", envOrDefault("REDIRECT_URI_SCHEME", "http"), "URI scheme for redirect URI (http or https)")
 	noAuth := flag.Bool("no-auth", envOrDefault("NO_AUTH", "") != "", "Disable authentication (development only)")
+	logLevel := flag.String("log-level", envOrDefault("LOG_LEVEL", "info"), "Log level (debug, info, warn, error)")
+	logEncoding := flag.String("log-encoding", envOrDefault("LOG_ENCODING", "json"), "Log encoding (json or console)")
 	flag.Parse()
+
+	zapLog, err := newLogger(*logLevel, *logEncoding)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		os.Exit(1)
+	}
+	defer zapLog.Sync() //nolint:errcheck
+
+	// modelsrv writes some internal diagnostics via the std log package; route
+	// them through zap so all output shares one format.
+	defer zap.RedirectStdLog(zapLog)()
+
+	logger := zapLog.Sugar()
 
 	// Validate redirectURIScheme
 	if err := validateRedirectURIScheme(*redirectURIScheme); err != nil {
-		fmt.Fprintf(os.Stderr, "invalid redirect-uri-scheme: %v\n", err)
+		logger.Errorw("invalid redirect-uri-scheme", "error", err)
 		os.Exit(1)
 	}
 
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
-
 	// Create in-process modelsrv backend
-	b, err := backend.New()
+	b, err := backend.New(backend.WithLogger(logger))
 	if err != nil {
-		logger.Error("failed to create backend", "error", err)
+		logger.Errorw("failed to create backend", "error", err)
 		os.Exit(1)
 	}
 
 	// Optionally watch a data directory for YAML files
 	if *dataDir != "" {
 		abs, _ := filepath.Abs(*dataDir)
-		logger.Info("file sensor enabled", "dir", abs)
-		filesensor.Start(context.Background(), abs, b.GetModel(), nil)
+		logger.Infow("file sensor enabled", "dir", abs)
+		filesensor.Start(context.Background(), abs, b.GetModel(), logger)
 	}
 
 	// OIDC setup
@@ -65,16 +79,17 @@ func main() {
 		jwksURL := *issuerURL + "/keys"
 		jwks, err = keyfunc.NewDefaultCtx(context.Background(), []string{jwksURL})
 		if err != nil {
-			logger.Error("failed to fetch JWKS", "url", jwksURL, "error", err)
+			logger.Errorw("failed to fetch JWKS", "url", jwksURL, "error", err)
 			os.Exit(1)
 		}
-		logger.Info("OIDC enabled", "issuer", *issuerURL, "clientID", *clientID)
+		logger.Infow("OIDC enabled", "issuer", *issuerURL, "clientID", *clientID)
 	}
 
 	// Build modelsrv handler
 	baseURL := resolveBaseURL(*listenAddr)
 	modelsrvHandler := endpoint.NewHandler(b.GetModel(), b.GetEventManager(), baseURL, endpoint.WebListenerOptions{
 		TrustAuthHeaders: true,
+		Logger:           logger,
 		AuthzConfig: authz.Config{
 			AuditorGroup: *auditorGroup,
 			PublicTypes:  authz.ParsePublicResourceTypes(*publicTypes),
@@ -98,26 +113,53 @@ func main() {
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
-	logger.Info("starting server", "listen", *listenAddr)
+	logger.Infow("starting server", "listen", *listenAddr)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	go func() {
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			logger.Error("listen error", "error", err)
+			logger.Errorw("listen error", "error", err)
 			os.Exit(1)
 		}
 	}()
 
 	<-ctx.Done()
-	logger.Info("shutting down")
+	logger.Infow("shutting down")
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := srv.Shutdown(shutdownCtx); err != nil {
-		logger.Error("shutdown error", "error", err)
+		logger.Errorw("shutdown error", "error", err)
 	}
+}
+
+// newLogger builds the application logger. Defaults match the previous slog
+// setup (JSON on stdout at info level) so log consumers keep working.
+func newLogger(level, encoding string) (*zap.Logger, error) {
+	cfg := zap.NewProductionConfig()
+	cfg.DisableStacktrace = true
+	cfg.EncoderConfig.EncodeTime = zapcore.ISO8601TimeEncoder
+
+	if level != "" {
+		var l zap.AtomicLevel
+		if err := l.UnmarshalText([]byte(level)); err != nil {
+			return nil, fmt.Errorf("invalid log-level %q: must be debug, info, warn or error", level)
+		}
+		cfg.Level = l
+	}
+
+	switch encoding {
+	case "", "json":
+		cfg.Encoding = "json"
+	case "console":
+		cfg.Encoding = "console"
+	default:
+		return nil, fmt.Errorf("invalid log-encoding %q: must be json or console", encoding)
+	}
+
+	return cfg.Build()
 }
 
 type muxConfig struct {
@@ -127,7 +169,7 @@ type muxConfig struct {
 	authCfg         auth.Config
 	jwks            keyfunc.Keyfunc
 	auditorGroupID  string
-	logger          *slog.Logger
+	logger          *zap.SugaredLogger
 }
 
 // newMux builds the HTTP handler with auth, modelsrv API, and static file serving.
@@ -144,7 +186,7 @@ func newMux(cfg muxConfig) http.Handler {
 			apiHandler = auth.StubMiddleware(injected)
 		}
 	} else {
-		cfg.logger.Warn("authentication disabled")
+		cfg.logger.Warnw("authentication disabled")
 		apiHandler = injected
 	}
 	mux.Handle("/api/", apiHandler)
@@ -195,7 +237,7 @@ func newMux(cfg muxConfig) http.Handler {
 	// SPA static files
 	if cfg.staticDir != "" {
 		abs, _ := filepath.Abs(cfg.staticDir)
-		cfg.logger.Info("serving static files", "dir", abs)
+		cfg.logger.Infow("serving static files", "dir", abs)
 		mux.Handle("/", spaHandler(http.Dir(abs)))
 	} else {
 		mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
