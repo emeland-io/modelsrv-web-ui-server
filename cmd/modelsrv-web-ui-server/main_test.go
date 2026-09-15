@@ -1,6 +1,7 @@
 package main
 
 import (
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -9,6 +10,7 @@ import (
 	"testing"
 
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 
 	"go.emeland.io/modelsrv-web-ui-server/internal/auth"
 )
@@ -238,6 +240,43 @@ func TestAuthConfigJSON_WithIssuer(t *testing.T) {
 	}
 }
 
+func TestAuthConfigJSON_RewritesLoopbackIssuerToMatchUIHost(t *testing.T) {
+	handler := testMux(func(c *muxConfig) {
+		c.noAuth = false
+		c.authCfg = auth.Config{IssuerURL: "http://localhost:5556/dex", ClientID: "emeland-ui"}
+	})
+
+	req := httptest.NewRequest("GET", "/auth/config.json", nil)
+	req.Host = "127.0.0.1:8080"
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	body := rec.Body.String()
+	if !strings.Contains(body, `"issuerUrl":"http://127.0.0.1:5556/dex"`) {
+		t.Errorf("expected issuer rewritten to 127.0.0.1, got %q", body)
+	}
+	if !strings.Contains(body, `"redirectUri":"http://127.0.0.1:8080/callback"`) {
+		t.Errorf("expected matching redirectUri, got %q", body)
+	}
+}
+
+func TestPublicIssuerURL(t *testing.T) {
+	tests := []struct {
+		issuer, host, want string
+	}{
+		{"http://localhost:5556/dex", "127.0.0.1:8080", "http://127.0.0.1:5556/dex"},
+		{"http://127.0.0.1:5556/dex", "localhost:8080", "http://localhost:5556/dex"},
+		{"http://localhost:5556/dex", "localhost:8080", "http://localhost:5556/dex"},
+		{"http://dex.example.com/dex", "127.0.0.1:8080", "http://dex.example.com/dex"},
+		{"http://localhost:5556/dex", "emeland.example.com", "http://localhost:5556/dex"},
+	}
+	for _, tt := range tests {
+		if got := publicIssuerURL(tt.issuer, tt.host); got != tt.want {
+			t.Errorf("publicIssuerURL(%q, %q) = %q, want %q", tt.issuer, tt.host, got, tt.want)
+		}
+	}
+}
+
 func TestAuthToken_MethodNotAllowed(t *testing.T) {
 	handler := testMux(func(c *muxConfig) {
 		c.authCfg = auth.Config{IssuerURL: "http://dex:5556/dex", ClientID: "x"}
@@ -275,6 +314,84 @@ func TestAuthToken_ProxiesToIdP(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "access_token") {
 		t.Errorf("expected token response, got %q", rec.Body.String())
+	}
+}
+
+func TestAuthToken_ForwardsIdPErrorAndLogs(t *testing.T) {
+	core, observed := observer.New(zap.WarnLevel)
+	logger := zap.New(core).Sugar()
+
+	var gotPath, gotBody string
+	idp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		b, _ := io.ReadAll(r.Body)
+		gotBody = string(b)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":"invalid_request","error_description":"fake dex"}`))
+	}))
+	defer idp.Close()
+
+	handler := testMux(func(c *muxConfig) {
+		c.noAuth = false
+		c.logger = logger
+		c.authCfg = auth.Config{IssuerURL: idp.URL, ClientID: "emeland-ui", RedirectURIScheme: "http"}
+	})
+
+	form := "grant_type=authorization_code&client_id=emeland-ui&code=abc&redirect_uri=http://localhost:8080/callback&code_verifier=verifier"
+	req := httptest.NewRequest("POST", "/auth/token", strings.NewReader(form))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("got %d, want 400", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), `"error":"invalid_request"`) {
+		t.Errorf("expected Dex error body, got %q", rec.Body.String())
+	}
+	if gotPath != "/token" {
+		t.Errorf("upstream path = %q, want /token", gotPath)
+	}
+	if !strings.Contains(gotBody, "grant_type=authorization_code") || !strings.Contains(gotBody, "code_verifier=verifier") {
+		t.Errorf("upstream did not receive form body: %q", gotBody)
+	}
+	if observed.FilterMessage("token exchange rejected").Len() == 0 {
+		t.Fatalf("expected warn log for rejected token exchange, got %#v", observed.All())
+	}
+}
+
+func TestAuthToken_UnconfiguredDoesNotServeSPA(t *testing.T) {
+	core, observed := observer.New(zap.WarnLevel)
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "index.html"), []byte("<html>app</html>"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	handler := testMux(func(c *muxConfig) {
+		c.staticDir = dir
+		c.logger = zap.New(core).Sugar()
+	})
+
+	req := httptest.NewRequest("POST", "/auth/token", strings.NewReader("grant_type=authorization_code&code=abc"))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("got %d, want 503", rec.Code)
+	}
+	if rec.Header().Get("Content-Type") != "application/json" {
+		t.Errorf("Content-Type = %q, want application/json", rec.Header().Get("Content-Type"))
+	}
+	if strings.Contains(rec.Body.String(), "<html>") {
+		t.Errorf("SPA fallback must not handle /auth/token, got %q", rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "token_proxy_unconfigured") {
+		t.Errorf("expected unconfigured error, got %q", rec.Body.String())
+	}
+	if observed.FilterMessage("token exchange skipped").Len() == 0 {
+		t.Fatalf("expected warn log when issuer is missing, got %#v", observed.All())
 	}
 }
 

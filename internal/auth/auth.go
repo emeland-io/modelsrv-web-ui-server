@@ -34,6 +34,18 @@ type Config struct {
 	IssuerURL         string
 	ClientID          string
 	RedirectURIScheme string
+	Logger            WarnLogger
+}
+
+// WarnLogger is the subset of zap's sugared logger used by auth middleware.
+type WarnLogger interface {
+	Warnw(msg string, keysAndValues ...interface{})
+}
+
+func warnw(log WarnLogger, msg string, keysAndValues ...interface{}) {
+	if log != nil {
+		log.Warnw(msg, keysAndValues...)
+	}
 }
 
 // JWTMiddleware validates Bearer tokens as JWTs against the issuer's JWKS.
@@ -41,6 +53,7 @@ func JWTMiddleware(cfg Config, jwks keyfunc.Keyfunc, next http.Handler) http.Han
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		tokenStr := extractBearer(r)
 		if tokenStr == "" {
+			warnw(cfg.Logger, "request unauthorized", "path", r.URL.Path, "reason", "missing bearer")
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
@@ -51,12 +64,14 @@ func JWTMiddleware(cfg Config, jwks keyfunc.Keyfunc, next http.Handler) http.Han
 			jwt.WithExpirationRequired(),
 		)
 		if err != nil || !token.Valid {
+			warnw(cfg.Logger, "request unauthorized", "path", r.URL.Path, "reason", "invalid token", "error", err)
 			http.Error(w, fmt.Sprintf("invalid token: %v", err), http.StatusUnauthorized)
 			return
 		}
 
 		claims, err := extractClaims(token)
 		if err != nil {
+			warnw(cfg.Logger, "request unauthorized", "path", r.URL.Path, "reason", "invalid claims")
 			http.Error(w, "invalid claims", http.StatusUnauthorized)
 			return
 		}
