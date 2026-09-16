@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -101,7 +102,7 @@ func main() {
 		modelsrvHandler:   modelsrvHandler,
 		staticDir:         *staticDir,
 		noAuth:            *noAuth,
-		authCfg:           auth.Config{IssuerURL: *issuerURL, ClientID: *clientID, RedirectURIScheme: *redirectURIScheme},
+		authCfg:           auth.Config{IssuerURL: *issuerURL, ClientID: *clientID, RedirectURIScheme: *redirectURIScheme, Logger: logger},
 		jwks:              jwks,
 		auditorGroupID:    *auditorGroup,
 		logger:            logger,
@@ -174,6 +175,9 @@ type muxConfig struct {
 
 // newMux builds the HTTP handler with auth, modelsrv API, and static file serving.
 func newMux(cfg muxConfig) http.Handler {
+	if cfg.authCfg.Logger == nil {
+		cfg.authCfg.Logger = cfg.logger
+	}
 	mux := http.NewServeMux()
 
 	// Build the header-injecting handler once; wrap with auth as needed.
@@ -203,36 +207,54 @@ func newMux(cfg muxConfig) http.Handler {
 			if scheme == "" {
 				scheme = "http"
 			}
+			issuer := publicIssuerURL(cfg.authCfg.IssuerURL, r.Host)
 			_, _ = fmt.Fprintf(w, `{"issuerUrl":%q,"clientId":%q,"redirectUri":"%s://%s/callback"}`,
-				cfg.authCfg.IssuerURL, cfg.authCfg.ClientID, scheme, r.Host)
+				issuer, cfg.authCfg.ClientID, scheme, r.Host)
 		}
 	})
 
-	// Token exchange proxy (avoids CORS with IdP)
-	if cfg.authCfg.IssuerURL != "" {
+	// Token exchange proxy (avoids CORS with IdP). Always registered so POST
+	// /auth/token is never swallowed by the SPA fallback (which would return 200 HTML).
+	mux.HandleFunc("/auth/token", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if cfg.authCfg.IssuerURL == "" {
+			cfg.logger.Warnw("token exchange skipped", "reason", "OIDC issuer not configured")
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte(`{"error":"token_proxy_unconfigured","error_description":"OIDC issuer is not configured"}`))
+			return
+		}
+
 		tokenURL := cfg.authCfg.IssuerURL + "/token"
-		mux.HandleFunc("/auth/token", func(w http.ResponseWriter, r *http.Request) {
-			if r.Method != http.MethodPost {
-				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-				return
-			}
-			proxyReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, tokenURL, r.Body)
-			if err != nil {
-				http.Error(w, "bad request", http.StatusBadRequest)
-				return
-			}
-			proxyReq.Header.Set("Content-Type", r.Header.Get("Content-Type"))
-			resp, err := http.DefaultClient.Do(proxyReq)
-			if err != nil {
-				http.Error(w, "token exchange failed", http.StatusBadGateway)
-				return
-			}
-			defer resp.Body.Close() //nolint:errcheck
-			w.Header().Set("Content-Type", resp.Header.Get("Content-Type"))
-			w.WriteHeader(resp.StatusCode)
-			_, _ = io.Copy(w, resp.Body)
-		})
-	}
+		proxyReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, tokenURL, r.Body)
+		if err != nil {
+			cfg.logger.Errorw("token exchange bad request", "error", err)
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		proxyReq.Header.Set("Content-Type", r.Header.Get("Content-Type"))
+		resp, err := http.DefaultClient.Do(proxyReq)
+		if err != nil {
+			cfg.logger.Errorw("token exchange failed", "upstream", tokenURL, "error", err)
+			http.Error(w, "token exchange failed", http.StatusBadGateway)
+			return
+		}
+		defer resp.Body.Close() //nolint:errcheck
+		respBody, _ := io.ReadAll(resp.Body)
+		if resp.StatusCode >= 400 {
+			cfg.logger.Warnw("token exchange rejected", "upstream", tokenURL, "status", resp.StatusCode, "error", truncateForLog(respBody, 500))
+		} else {
+			cfg.logger.Infow("token exchange", "upstream", tokenURL, "status", resp.StatusCode)
+		}
+		if ct := resp.Header.Get("Content-Type"); ct != "" {
+			w.Header().Set("Content-Type", ct)
+		}
+		w.WriteHeader(resp.StatusCode)
+		_, _ = w.Write(respBody)
+	})
 
 	// SPA static files
 	if cfg.staticDir != "" {
@@ -330,4 +352,50 @@ func validateRedirectURIScheme(scheme string) error {
 	default:
 		return fmt.Errorf("must be 'http' or 'https', got %q", scheme)
 	}
+}
+
+func truncateForLog(b []byte, n int) string {
+	s := string(b)
+	if len(s) > n {
+		return s[:n]
+	}
+	return s
+}
+
+// publicIssuerURL rewrites a loopback IdP host (localhost ↔ 127.0.0.1) to match
+// the host the browser used for the UI. Token proxy and JWKS keep the original
+// issuer; only /auth/config.json needs a URL the browser can open.
+func publicIssuerURL(issuer, requestHost string) string {
+	uiHost, _, err := net.SplitHostPort(requestHost)
+	if err != nil {
+		uiHost = requestHost
+	}
+	u, err := url.Parse(issuer)
+	if err != nil || u.Host == "" {
+		return issuer
+	}
+	idpHost, idpPort, err := net.SplitHostPort(u.Host)
+	if err != nil {
+		idpHost, idpPort = u.Host, ""
+	}
+	if !isLoopbackHost(uiHost) || !isLoopbackHost(idpHost) || uiHost == idpHost {
+		return issuer
+	}
+	if idpPort != "" {
+		u.Host = net.JoinHostPort(uiHost, idpPort)
+	} else {
+		u.Host = uiHost
+	}
+	return u.String()
+}
+
+func isLoopbackHost(host string) bool {
+	h := strings.Trim(host, "[]")
+	if h == "localhost" || h == "127.0.0.1" || h == "::1" {
+		return true
+	}
+	if ip := net.ParseIP(h); ip != nil {
+		return ip.IsLoopback()
+	}
+	return false
 }

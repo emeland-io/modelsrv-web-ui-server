@@ -36,6 +36,7 @@ A single zap logger is shared with the embedded modelsrv library, so one stream 
 
 - Application lifecycle (startup, shutdown, OIDC and file sensor setup)
 - HTTP requests handled by the modelsrv API (`/api/`); `/swagger/` and `/metrics` log at `debug`
+- OIDC token exchange via `/auth/token` (success at `info`, IdP rejections at `warn`)
 - File sensor activity, including documents skipped because of validation errors
 - Event manager subscriber notification failures
 - modelsrv internals that write via the std `log` package (redirected into zap)
