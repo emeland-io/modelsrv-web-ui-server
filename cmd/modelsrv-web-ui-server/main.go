@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -36,7 +37,12 @@ func main() {
 	issuerURL := flag.String("issuer-url", envOrDefault("OIDC_ISSUER_URL", ""), "OIDC issuer URL")
 	clientID := flag.String("client-id", envOrDefault("OIDC_CLIENT_ID", "emeland-ui"), "OIDC client ID / audience")
 	redirectURIScheme := flag.String("redirect-uri-scheme", envOrDefault("REDIRECT_URI_SCHEME", "http"), "URI scheme for redirect URI (http or https)")
-	noAuth := flag.Bool("no-auth", envOrDefault("NO_AUTH", "") != "", "Disable authentication (development only)")
+	noAuthDefault, err := parseEnvBool("NO_AUTH", false)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		os.Exit(1)
+	}
+	noAuth := flag.Bool("no-auth", noAuthDefault, "Disable authentication (development only)")
 	logLevel := flag.String("log-level", envOrDefault("LOG_LEVEL", "info"), "Log level (debug, info, warn, error)")
 	logEncoding := flag.String("log-encoding", envOrDefault("LOG_ENCODING", "json"), "Log encoding (json or console)")
 	flag.Parse()
@@ -193,6 +199,9 @@ func newMux(cfg muxConfig) http.Handler {
 		cfg.logger.Warnw("authentication disabled")
 		apiHandler = injected
 	}
+	// In-cluster replication (filter/sensors) must not require a browser Dex JWT.
+	// More-specific method+path patterns take precedence over the /api/ prefix.
+	mux.Handle("POST /api/events/push", injected)
 	mux.Handle("/api/", apiHandler)
 	mux.Handle("/swagger/", cfg.modelsrvHandler)
 	mux.Handle("/metrics", cfg.modelsrvHandler)
@@ -342,6 +351,20 @@ func envOrDefault(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// parseEnvBool reads key from the environment. Unset or empty uses fallback.
+// Values are parsed with strconv.ParseBool (true/false, 1/0, t/f, TRUE/FALSE).
+func parseEnvBool(key string, fallback bool) (bool, error) {
+	v, ok := os.LookupEnv(key)
+	if !ok || v == "" {
+		return fallback, nil
+	}
+	b, err := strconv.ParseBool(v)
+	if err != nil {
+		return false, fmt.Errorf("invalid %s %q: must be a boolean (true/false, 1/0)", key, v)
+	}
+	return b, nil
 }
 
 // validateRedirectURIScheme checks that the scheme is one of the allowed values.

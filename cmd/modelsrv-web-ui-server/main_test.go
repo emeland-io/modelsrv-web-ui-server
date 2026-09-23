@@ -150,6 +150,31 @@ func TestAPI_NoAuth_PassesThrough(t *testing.T) {
 	}
 }
 
+func TestAPI_EventsPush_BypassesAuth(t *testing.T) {
+	handler := testMux(func(c *muxConfig) { c.noAuth = false })
+
+	req := httptest.NewRequest("POST", "/api/events/push", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST /api/events/push got %d, want 200", rec.Code)
+	}
+}
+
+func TestAPI_EventsHistory_RequiresAuth(t *testing.T) {
+	handler := testMux(func(c *muxConfig) { c.noAuth = false })
+
+	req := httptest.NewRequest("GET", "/api/events/history", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("GET /api/events/history got %d, want 401", rec.Code)
+	}
+}
+
 func TestHeaderInjector_StripsClientSpoofedHeaders(t *testing.T) {
 	const auditorGroup = "audit-group-uuid"
 	var captured http.Header
@@ -520,6 +545,54 @@ func TestNewLogger(t *testing.T) {
 			}
 			if tt.wantValid && log == nil {
 				t.Error("expected a logger, got nil")
+			}
+		})
+	}
+}
+
+func TestParseEnvBool(t *testing.T) {
+	const key = "MODELSRV_WEB_UI_SERVER_TEST_NO_AUTH"
+	t.Cleanup(func() { _ = os.Unsetenv(key) })
+
+	tests := []struct {
+		name      string
+		set       bool
+		value     string
+		fallback  bool
+		want      bool
+		wantError bool
+	}{
+		{"unset uses fallback false", false, "", false, false, false},
+		{"unset uses fallback true", false, "", true, true, false},
+		{"empty uses fallback", true, "", false, false, false},
+		{"false keeps auth on", true, "false", true, false, false},
+		{"FALSE keeps auth on", true, "FALSE", true, false, false},
+		{"0 keeps auth on", true, "0", true, false, false},
+		{"true disables auth", true, "true", false, true, false},
+		{"1 disables auth", true, "1", false, true, false},
+		{"invalid", true, "yes", false, false, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_ = os.Unsetenv(key)
+			if tt.set {
+				if err := os.Setenv(key, tt.value); err != nil {
+					t.Fatal(err)
+				}
+			}
+			got, err := parseEnvBool(key, tt.fallback)
+			if tt.wantError {
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tt.want {
+				t.Errorf("parseEnvBool = %v, want %v", got, tt.want)
 			}
 		})
 	}
