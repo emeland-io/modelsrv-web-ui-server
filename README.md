@@ -26,7 +26,7 @@ Like all EmELand modules (git-sensor, k8s-sensor, etc.), this embeds modelsrv as
 | `--client-id` | `OIDC_CLIENT_ID` | `emeland-ui` | OIDC client ID |
 | `--auditor-group` | `AUDITOR_GROUP_ID` | (empty) | Auditor group UUID (full access) |
 | `--public-resource-types` | `PUBLIC_RESOURCE_TYPES` | (empty) | Comma-separated resource types always visible |
-| `--no-auth` | `NO_AUTH` | false | Disable authentication |
+| `--no-auth` | `NO_AUTH` | false | Disable authentication (`true`/`false`, `1`/`0`; `NO_AUTH=false` keeps auth on) |
 | `--log-level` | `LOG_LEVEL` | `info` | Log level (`debug`, `info`, `warn`, `error`) |
 | `--log-encoding` | `LOG_ENCODING` | `json` | Log encoding (`json` or `console`) |
 
@@ -96,12 +96,18 @@ The bundled emeland-ui version defaults to the `UI_VERSION` build arg in the [Do
 ## Architecture
 
 ```
-Browser -> [OIDC auth] -> [X-Auth-* header injection] -> modelsrv handler (/api/, /swagger/, /metrics)
+Browser -> [OIDC JWT] -> [X-Auth-* header injection] -> modelsrv landscape API (/api/landscape/...)
        \-> SPA static files (/)
        \-> /auth/config.json, /auth/token (OIDC helpers)
+
+Sensors/filter -> POST /api/events/push (no JWT; in-cluster replication) -> modelsrv handler
 ```
 
-Data flows in via the event subscriber mechanism from upstream sensors (git-sensor, k8s-sensor, etc.) or from YAML files watched by the built-in file sensor.
+Dex/OIDC protects browser access to the landscape API. `POST /api/events/push` stays
+unauthenticated so in-cluster filter and sensor replication can push without a user token.
+Cluster networking (ClusterIP / NetworkPolicy) is the intended boundary for that path.
+
+Data also flows in from YAML files watched by the built-in file sensor.
 
 ## Development
 
