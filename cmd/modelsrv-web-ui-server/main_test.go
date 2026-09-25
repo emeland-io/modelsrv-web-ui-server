@@ -163,6 +163,51 @@ func TestAPI_EventsPush_BypassesAuth(t *testing.T) {
 	}
 }
 
+func TestAccessLog_EventsPushLogsPayload(t *testing.T) {
+	core, observed := observer.New(zap.DebugLevel)
+	logger := zap.New(core).Sugar()
+	handler := testMux(func(c *muxConfig) {
+		c.noAuth = false
+		c.logger = logger
+	})
+
+	body := `{"kind":"ApiInstance","operation":"Create","resource":{"apiInstanceId":"11111111-1111-1111-1111-111111111111","displayName":"zephyr-api"}}`
+	req := httptest.NewRequest("POST", "/api/events/push", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.RemoteAddr = "10.0.0.8:4321"
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200", rec.Code)
+	}
+	got := observed.FilterMessage("events push received").FilterLevelExact(zap.InfoLevel)
+	if got.Len() != 1 {
+		t.Fatalf("events push logs = %d, want 1; all=%v", got.Len(), observed.All())
+	}
+	fields := got.All()[0].ContextMap()
+	if fields["kind"] != "ApiInstance" {
+		t.Errorf("kind = %v", fields["kind"])
+	}
+	if fields["displayName"] != "zephyr-api" {
+		t.Errorf("displayName = %v", fields["displayName"])
+	}
+	if fields["remote"] != "10.0.0.8:4321" {
+		t.Errorf("remote = %v", fields["remote"])
+	}
+	if _, ok := fields["body"]; ok {
+		t.Errorf("info log must not include the replication body, got %v", fields["body"])
+	}
+	debugBody := observed.FilterMessage("events push body").FilterLevelExact(zap.DebugLevel)
+	if debugBody.Len() != 1 {
+		t.Fatalf("debug body logs = %d, want 1", debugBody.Len())
+	}
+	logged, _ := debugBody.All()[0].ContextMap()["body"].(string)
+	if !strings.Contains(logged, "zephyr-api") {
+		t.Errorf("debug body = %v", debugBody.All()[0].ContextMap()["body"])
+	}
+}
+
 func TestAPI_EventsHistory_RequiresAuth(t *testing.T) {
 	handler := testMux(func(c *muxConfig) { c.noAuth = false })
 
@@ -179,7 +224,7 @@ func TestHeaderInjector_StripsClientSpoofedHeaders(t *testing.T) {
 	const auditorGroup = "audit-group-uuid"
 	var captured http.Header
 
-	inner := headerInjector(fakeModelsrvHandler(&captured), auditorGroup)
+	inner := headerInjector(testLogger(), fakeModelsrvHandler(&captured), auditorGroup)
 
 	req := httptest.NewRequest("GET", "/api/test", nil)
 	req.Header.Set("X-Auth-Subject", "spoofed")
