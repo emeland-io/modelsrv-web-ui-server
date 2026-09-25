@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -23,6 +25,7 @@ import (
 	"go.emeland.io/modelsrv/pkg/authz"
 	"go.emeland.io/modelsrv/pkg/backend"
 	"go.emeland.io/modelsrv/pkg/endpoint"
+	"go.emeland.io/modelsrv/pkg/events"
 	"go.emeland.io/modelsrv/pkg/filesensor"
 
 	"go.emeland.io/modelsrv-web-ui-server/internal/auth"
@@ -102,6 +105,32 @@ func main() {
 			PublicTypes:  authz.ParsePublicResourceTypes(*publicTypes),
 		},
 	})
+
+	public := authz.ParsePublicResourceTypes(*publicTypes)
+	authMode := "jwt"
+	switch {
+	case *noAuth:
+		authMode = "disabled"
+	case *issuerURL == "":
+		authMode = "stub"
+	}
+	logger.Infow("server config",
+		"listen", *listenAddr,
+		"baseURL", baseURL,
+		"auth", authMode,
+		"eventsPushAuth", "bypassed",
+		"issuer", *issuerURL,
+		"clientID", *clientID,
+		"redirectURIScheme", *redirectURIScheme,
+		"auditorGroup", *auditorGroup,
+		"publicResourceTypes", *publicTypes,
+		"publicResourceTypesResolved", resourceTypeNames(public),
+		"publicResourceTypesUnrecognized", unrecognizedPublicTypes(*publicTypes),
+		"dataDir", *dataDir,
+		"staticDir", *staticDir,
+		"logLevel", *logLevel,
+		"logEncoding", *logEncoding,
+	)
 
 	// Build the top-level mux
 	mux := newMux(muxConfig{
@@ -187,16 +216,19 @@ func newMux(cfg muxConfig) http.Handler {
 	mux := http.NewServeMux()
 
 	// Build the header-injecting handler once; wrap with auth as needed.
-	injected := headerInjector(cfg.modelsrvHandler, cfg.auditorGroupID)
+	injected := headerInjector(cfg.logger, cfg.modelsrvHandler, cfg.auditorGroupID)
 	var apiHandler http.Handler
 	if !cfg.noAuth {
 		if cfg.jwks != nil {
 			apiHandler = auth.JWTMiddleware(cfg.authCfg, cfg.jwks, injected)
+			cfg.logger.Debugw("api auth wrapper", "mode", "jwt", "issuer", cfg.authCfg.IssuerURL, "clientID", cfg.authCfg.ClientID, "eventsPush", "bypassed")
 		} else {
 			apiHandler = auth.StubMiddleware(injected)
+			cfg.logger.Debugw("api auth wrapper", "mode", "stub", "reason", "issuer url empty", "eventsPush", "bypassed")
 		}
 	} else {
 		cfg.logger.Warnw("authentication disabled")
+		cfg.logger.Debugw("api auth wrapper", "mode", "disabled", "eventsPush", "bypassed")
 		apiHandler = injected
 	}
 	// In-cluster replication (filter/sensors) must not require a browser Dex JWT.
@@ -217,6 +249,7 @@ func newMux(cfg muxConfig) http.Handler {
 				scheme = "http"
 			}
 			issuer := publicIssuerURL(cfg.authCfg.IssuerURL, r.Host)
+			cfg.logger.Debugw("auth config", "requestHost", r.Host, "configuredIssuer", cfg.authCfg.IssuerURL, "publicIssuer", issuer, "scheme", scheme, "clientID", cfg.authCfg.ClientID)
 			_, _ = fmt.Fprintf(w, `{"issuerUrl":%q,"clientId":%q,"redirectUri":"%s://%s/callback"}`,
 				issuer, cfg.authCfg.ClientID, scheme, r.Host)
 		}
@@ -238,6 +271,7 @@ func newMux(cfg muxConfig) http.Handler {
 		}
 
 		tokenURL := cfg.authCfg.IssuerURL + "/token"
+		cfg.logger.Debugw("token exchange upstream", "url", tokenURL, "contentType", r.Header.Get("Content-Type"), "contentLength", r.ContentLength, "remote", r.RemoteAddr)
 		proxyReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, tokenURL, r.Body)
 		if err != nil {
 			cfg.logger.Errorw("token exchange bad request", "error", err)
@@ -281,21 +315,24 @@ func newMux(cfg muxConfig) http.Handler {
 		})
 	}
 
-	return mux
+	return accessLog(cfg.logger, mux)
 }
 
 // headerInjector strips client-sent X-Auth-* headers and injects trusted identity
 // headers from the authenticated claims so modelsrv's authz layer can enforce
 // ownership visibility.
-func headerInjector(next http.Handler, auditorGroupID string) http.Handler {
+func headerInjector(log *zap.SugaredLogger, next http.Handler, auditorGroupID string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Strip any client-sent X-Auth-* headers to prevent spoofing.
+		var stripped []string
 		for key := range r.Header {
 			if strings.HasPrefix(strings.ToLower(key), "x-auth-") {
+				stripped = append(stripped, key)
 				r.Header.Del(key)
 			}
 		}
 		claims := auth.FromContext(r.Context())
+		auditor := false
 		if claims != nil {
 			r.Header.Set("X-Auth-Subject", claims.Subject)
 			if len(claims.Groups) > 0 {
@@ -305,10 +342,48 @@ func headerInjector(next http.Handler, auditorGroupID string) http.Handler {
 				for _, g := range claims.Groups {
 					if g == auditorGroupID {
 						r.Header.Set("X-Auth-Auditor", "true")
+						auditor = true
 						break
 					}
 				}
 			}
+		}
+		if log != nil {
+			subject := ""
+			groups := 0
+			if claims != nil {
+				subject = claims.Subject
+				groups = len(claims.Groups)
+			}
+			log.Infow("auth headers",
+				"method", r.Method,
+				"path", r.URL.Path,
+				"remote", r.RemoteAddr,
+				"authenticated", claims != nil,
+				"subject", subject,
+				"groups", groups,
+				"auditor", auditor,
+				"strippedClientHeaders", stripped,
+			)
+			log.Debugw("auth headers detail",
+				"method", r.Method,
+				"path", r.URL.Path,
+				"query", r.URL.RawQuery,
+				"proto", r.Proto,
+				"groupNames", func() []string {
+					if claims == nil {
+						return nil
+					}
+					return claims.Groups
+				}(),
+				"auditorGroupConfigured", auditorGroupID != "",
+				"forwardedHeaders", map[string]string{
+					"X-Auth-Subject": r.Header.Get("X-Auth-Subject"),
+					"X-Auth-Groups":  r.Header.Get("X-Auth-Groups"),
+					"X-Auth-Auditor": r.Header.Get("X-Auth-Auditor"),
+				},
+				"requestHeaders", redactHeaders(r.Header),
+			)
 		}
 		next.ServeHTTP(w, r)
 	})
@@ -375,6 +450,210 @@ func validateRedirectURIScheme(scheme string) error {
 	default:
 		return fmt.Errorf("must be 'http' or 'https', got %q", scheme)
 	}
+}
+
+// accessLog records every request. /api and /auth log at info (warn on 4xx/5xx);
+// everything else logs at debug. POST /api/events/push also logs the payload,
+// because that is the replication hop from the filter and a rejection here is
+// otherwise only visible upstream.
+func accessLog(log *zap.SugaredLogger, next http.Handler) http.Handler {
+	if log == nil {
+		return next
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		push := r.Method == http.MethodPost && r.URL.Path == "/api/events/push"
+		var reqBody []byte
+		if push && r.Body != nil {
+			var err error
+			reqBody, err = io.ReadAll(r.Body)
+			_ = r.Body.Close()
+			r.Body = io.NopCloser(bytes.NewReader(reqBody))
+			fields := []any{
+				"remote", r.RemoteAddr,
+				"host", r.Host,
+				"userAgent", r.UserAgent(),
+				"contentType", r.Header.Get("Content-Type"),
+				"contentLength", r.ContentLength,
+				"bytes", len(reqBody),
+				"hasAuth", r.Header.Get("Authorization") != "",
+				"forwardedFor", r.Header.Get("X-Forwarded-For"),
+			}
+			if err != nil {
+				fields = append(fields, "bodyError", err)
+			}
+			for k, v := range summarizePush(reqBody) {
+				fields = append(fields, k, v)
+			}
+			fields = append(fields, "body", truncateForLog(reqBody, 4000))
+			log.Infow("events push received", fields...)
+		}
+
+		log.Debugw("http request",
+			"method", r.Method,
+			"path", r.URL.Path,
+			"query", r.URL.RawQuery,
+			"proto", r.Proto,
+			"remote", r.RemoteAddr,
+			"host", r.Host,
+			"userAgent", r.UserAgent(),
+			"contentType", r.Header.Get("Content-Type"),
+			"contentLength", r.ContentLength,
+			"transferEncoding", r.TransferEncoding,
+			"hasAuth", r.Header.Get("Authorization") != "",
+			"eventsPush", push,
+			"headers", redactHeaders(r.Header),
+		)
+
+		sw := &captureWriter{ResponseWriter: w, status: http.StatusOK, limit: 4000}
+		next.ServeHTTP(sw, r)
+
+		path := r.URL.Path
+		fields := []any{
+			"method", r.Method,
+			"path", r.URL.RequestURI(),
+			"status", sw.status,
+			"bytes", sw.n,
+			"duration", time.Since(start).String(),
+			"remote", r.RemoteAddr,
+			"host", r.Host,
+			"userAgent", r.UserAgent(),
+			"hasAuth", r.Header.Get("Authorization") != "",
+			"contentType", r.Header.Get("Content-Type"),
+			"contentLength", r.ContentLength,
+		}
+		if push || sw.status >= 400 {
+			fields = append(fields, "response", truncateForLog(sw.buf.Bytes(), 4000))
+		}
+		log.Debugw("http response",
+			"method", r.Method,
+			"path", path,
+			"status", sw.status,
+			"bytes", sw.n,
+			"duration", time.Since(start).String(),
+			"headers", redactHeaders(sw.Header()),
+			"body", truncateForLog(sw.buf.Bytes(), 4000),
+		)
+
+		interesting := strings.HasPrefix(path, "/api/") || strings.HasPrefix(path, "/auth/")
+		switch {
+		case sw.status >= 500:
+			log.Errorw("http", fields...)
+		case sw.status >= 400:
+			log.Warnw("http", fields...)
+		case interesting || push:
+			log.Infow("http", fields...)
+		default:
+			log.Debugw("http", fields...)
+		}
+	})
+}
+
+type captureWriter struct {
+	http.ResponseWriter
+	status int
+	n      int
+	buf    bytes.Buffer
+	limit  int
+}
+
+func (w *captureWriter) WriteHeader(code int) {
+	w.status = code
+	w.ResponseWriter.WriteHeader(code)
+}
+
+func (w *captureWriter) Write(b []byte) (int, error) {
+	if w.buf.Len() < w.limit {
+		remain := w.limit - w.buf.Len()
+		if len(b) > remain {
+			_, _ = w.buf.Write(b[:remain])
+		} else {
+			_, _ = w.buf.Write(b)
+		}
+	}
+	n, err := w.ResponseWriter.Write(b)
+	w.n += n
+	return n, err
+}
+
+func summarizePush(body []byte) map[string]any {
+	out := map[string]any{}
+	if len(bytes.TrimSpace(body)) == 0 {
+		out["parseError"] = "empty body"
+		return out
+	}
+	var ev struct {
+		Kind       string         `json:"kind"`
+		Operation  any            `json:"operation"`
+		ResourceID string         `json:"resourceId"`
+		Resource   map[string]any `json:"resource"`
+	}
+	if err := json.Unmarshal(body, &ev); err != nil {
+		out["parseError"] = err.Error()
+		return out
+	}
+	out["kind"] = ev.Kind
+	out["operation"] = ev.Operation
+	if ev.ResourceID != "" {
+		out["resourceId"] = ev.ResourceID
+	}
+	if ev.Resource == nil {
+		return out
+	}
+	out["resourceKeys"] = mapKeys(ev.Resource)
+	for _, k := range []string{
+		"displayName", "resourceType", "findingId", "findingTypeId",
+		"apiInstanceId", "systemId", "systemInstanceId", "nodeId",
+		"componentId", "componentInstanceId", "contextId",
+	} {
+		if v, ok := ev.Resource[k]; ok {
+			out[k] = v
+		}
+	}
+	return out
+}
+
+func mapKeys(m map[string]any) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
+}
+
+func resourceTypeNames(types map[events.ResourceType]bool) []string {
+	names := make([]string, 0, len(types))
+	for rt := range types {
+		names = append(names, rt.String())
+	}
+	return names
+}
+
+func unrecognizedPublicTypes(raw string) []string {
+	var unknown []string
+	for _, part := range strings.Split(raw, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		if events.ParseResourceType(part) == events.UnknownResourceType {
+			unknown = append(unknown, part)
+		}
+	}
+	return unknown
+}
+
+func redactHeaders(h http.Header) map[string]string {
+	out := make(map[string]string, len(h))
+	for k, vals := range h {
+		v := strings.Join(vals, ",")
+		switch strings.ToLower(k) {
+		case "authorization", "cookie", "set-cookie", "x-api-key":
+			v = fmt.Sprintf("redacted len=%d", len(v))
+		}
+		out[k] = v
+	}
+	return out
 }
 
 func truncateForLog(b []byte, n int) string {

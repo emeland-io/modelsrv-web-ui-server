@@ -48,12 +48,22 @@ func warnw(log WarnLogger, msg string, keysAndValues ...interface{}) {
 	}
 }
 
+func debugw(log WarnLogger, msg string, keysAndValues ...interface{}) {
+	if d, ok := log.(interface {
+		Debugw(string, ...interface{})
+	}); ok {
+		d.Debugw(msg, keysAndValues...)
+	}
+}
+
 // JWTMiddleware validates Bearer tokens as JWTs against the issuer's JWKS.
 func JWTMiddleware(cfg Config, jwks keyfunc.Keyfunc, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		tokenStr := extractBearer(r)
 		if tokenStr == "" {
-			warnw(cfg.Logger, "request unauthorized", "path", r.URL.Path, "reason", "missing bearer")
+			warnw(cfg.Logger, "request unauthorized",
+				"method", r.Method, "path", r.URL.Path, "remote", r.RemoteAddr,
+				"host", r.Host, "userAgent", r.UserAgent(), "reason", "missing bearer")
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
@@ -64,18 +74,25 @@ func JWTMiddleware(cfg Config, jwks keyfunc.Keyfunc, next http.Handler) http.Han
 			jwt.WithExpirationRequired(),
 		)
 		if err != nil || !token.Valid {
-			warnw(cfg.Logger, "request unauthorized", "path", r.URL.Path, "reason", "invalid token", "error", err)
+			warnw(cfg.Logger, "request unauthorized",
+				"method", r.Method, "path", r.URL.Path, "remote", r.RemoteAddr,
+				"host", r.Host, "userAgent", r.UserAgent(), "reason", "invalid token", "error", err)
 			http.Error(w, fmt.Sprintf("invalid token: %v", err), http.StatusUnauthorized)
 			return
 		}
 
 		claims, err := extractClaims(token)
 		if err != nil {
-			warnw(cfg.Logger, "request unauthorized", "path", r.URL.Path, "reason", "invalid claims")
+			warnw(cfg.Logger, "request unauthorized",
+				"method", r.Method, "path", r.URL.Path, "remote", r.RemoteAddr,
+				"reason", "invalid claims")
 			http.Error(w, "invalid claims", http.StatusUnauthorized)
 			return
 		}
 
+		debugw(cfg.Logger, "jwt accepted",
+			"method", r.Method, "path", r.URL.Path, "remote", r.RemoteAddr,
+			"subject", claims.Subject, "groups", claims.Groups)
 		ctx := NewContext(r.Context(), claims)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
