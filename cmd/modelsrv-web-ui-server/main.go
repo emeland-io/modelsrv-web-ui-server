@@ -453,9 +453,13 @@ func validateRedirectURIScheme(scheme string) error {
 }
 
 // accessLog records every request. /api and /auth log at info (warn on 4xx/5xx);
-// everything else logs at debug. POST /api/events/push also logs the payload,
-// because that is the replication hop from the filter and a rejection here is
-// otherwise only visible upstream.
+// everything else logs at debug.
+//
+// POST /api/events/push is the replication hop from the filter. Info keeps a
+// short summary (kind, operation, id, caller, status) so a missing or rejected
+// hop is visible. The request body and response body are landscape resource
+// data and are logged only at debug: a healthy resync is hundreds of events,
+// and those payloads must not sit in the steady-state info log.
 func accessLog(log *zap.SugaredLogger, next http.Handler) http.Handler {
 	if log == nil {
 		return next
@@ -485,8 +489,8 @@ func accessLog(log *zap.SugaredLogger, next http.Handler) http.Handler {
 			for k, v := range summarizePush(reqBody) {
 				fields = append(fields, k, v)
 			}
-			fields = append(fields, "body", truncateForLog(reqBody, 4000))
 			log.Infow("events push received", fields...)
+			log.Debugw("events push body", "remote", r.RemoteAddr, "body", truncateForLog(reqBody, 4000))
 		}
 
 		log.Debugw("http request",
@@ -521,9 +525,6 @@ func accessLog(log *zap.SugaredLogger, next http.Handler) http.Handler {
 			"hasAuth", r.Header.Get("Authorization") != "",
 			"contentType", r.Header.Get("Content-Type"),
 			"contentLength", r.ContentLength,
-		}
-		if push || sw.status >= 400 {
-			fields = append(fields, "response", truncateForLog(sw.buf.Bytes(), 4000))
 		}
 		log.Debugw("http response",
 			"method", r.Method,

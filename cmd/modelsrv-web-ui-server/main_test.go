@@ -164,7 +164,7 @@ func TestAPI_EventsPush_BypassesAuth(t *testing.T) {
 }
 
 func TestAccessLog_EventsPushLogsPayload(t *testing.T) {
-	core, observed := observer.New(zap.InfoLevel)
+	core, observed := observer.New(zap.DebugLevel)
 	logger := zap.New(core).Sugar()
 	handler := testMux(func(c *muxConfig) {
 		c.noAuth = false
@@ -181,7 +181,7 @@ func TestAccessLog_EventsPushLogsPayload(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("got %d, want 200", rec.Code)
 	}
-	got := observed.FilterMessage("events push received")
+	got := observed.FilterMessage("events push received").FilterLevelExact(zap.InfoLevel)
 	if got.Len() != 1 {
 		t.Fatalf("events push logs = %d, want 1; all=%v", got.Len(), observed.All())
 	}
@@ -194,6 +194,17 @@ func TestAccessLog_EventsPushLogsPayload(t *testing.T) {
 	}
 	if fields["remote"] != "10.0.0.8:4321" {
 		t.Errorf("remote = %v", fields["remote"])
+	}
+	if _, ok := fields["body"]; ok {
+		t.Errorf("info log must not include the replication body, got %v", fields["body"])
+	}
+	debugBody := observed.FilterMessage("events push body").FilterLevelExact(zap.DebugLevel)
+	if debugBody.Len() != 1 {
+		t.Fatalf("debug body logs = %d, want 1", debugBody.Len())
+	}
+	logged, _ := debugBody.All()[0].ContextMap()["body"].(string)
+	if !strings.Contains(logged, "zephyr-api") {
+		t.Errorf("debug body = %v", debugBody.All()[0].ContextMap()["body"])
 	}
 }
 
